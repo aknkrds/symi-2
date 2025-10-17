@@ -1,0 +1,5 @@
+# CODEOWNERS controls auto-review assignment for changes in this repo
+* @aknkrds
+Symi.Api/** @aknkrds
+Symi.Tests/** @aknkrds
+.github/** @aknkrds

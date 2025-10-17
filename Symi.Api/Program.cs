@@ -4,21 +4,42 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Serilog;
+using Serilog.Events;
+using Serilog.Formatting.Json;
 using Symi.Api.Data;
 using Symi.Api.Middleware;
 using Symi.Api.Services;
+using System.Text.Json;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Serilog
-Log.Logger = new LoggerConfiguration()
-    .WriteTo.Console()
-    .Enrich.FromLogContext()
-    .CreateLogger();
-builder.Host.UseSerilog(Log.Logger);
-
 // Config
 var config = builder.Configuration;
+
+// Serilog (env-controlled via config)
+var serilogFormat = config["Logging:Serilog:Format"] ?? (builder.Environment.IsDevelopment() ? "json" : "plain");
+var minLevel = (config["Logging:Serilog:MinimumLevel"] ?? (builder.Environment.IsDevelopment() ? "Debug" : "Information")).ToLowerInvariant();
+var level = minLevel switch
+{
+    "debug" => LogEventLevel.Debug,
+    "information" => LogEventLevel.Information,
+    "warning" => LogEventLevel.Warning,
+    "error" => LogEventLevel.Error,
+    _ => LogEventLevel.Information
+};
+var loggerConfig = new LoggerConfiguration().MinimumLevel.Is(level).Enrich.FromLogContext();
+if (serilogFormat.Equals("json", StringComparison.OrdinalIgnoreCase))
+{
+    loggerConfig = loggerConfig.WriteTo.Console(new JsonFormatter());
+}
+else
+{
+    loggerConfig = loggerConfig.WriteTo.Console();
+}
+Log.Logger = loggerConfig.CreateLogger();
+builder.Host.UseSerilog(Log.Logger);
 
 // DbContext (SQLite)
 builder.Services.AddDbContext<AppDbContext>(options =>
@@ -170,6 +191,41 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+// Global exception to JSON
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("GlobalException");
+        logger.LogError(ex, "Unhandled exception at {Path}", context.Request.Path);
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsync(JsonSerializer.Serialize(new
+        {
+            code = "error",
+            message = ex.Message,
+            route = context.Request.Path,
+            stack = ex.StackTrace
+        }));
+    }
+});
+
+// CorrelationId & route enrichment
+app.Use(async (context, next) =>
+{
+    var correlationId = context.Request.Headers["X-Correlation-Id"].FirstOrDefault() ?? Guid.NewGuid().ToString();
+    context.Response.Headers["X-Correlation-Id"] = correlationId;
+    using (Serilog.Context.LogContext.PushProperty("CorrelationId", correlationId))
+    using (Serilog.Context.LogContext.PushProperty("Route", context.Request.Path))
+    {
+        await next();
+    }
+});
+
 if (!app.Environment.IsEnvironment("Testing"))
 {
     app.UseHttpsRedirection();
@@ -208,6 +264,17 @@ app.Use(async (context, next) =>
 
 app.MapControllers();
 
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = async (ctx, report) =>
+    {
+        ctx.Response.ContentType = "application/json";
+        await ctx.Response.WriteAsync(JsonSerializer.Serialize(new
+        {
+            status = "ok",
+            ts = DateTime.UtcNow.ToString("O")
+        }));
+    }
+});
 
 app.Run();
