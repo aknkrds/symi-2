@@ -56,24 +56,48 @@ public class AuthController : ControllerBase
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginRequest req)
     {
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == req.EmailOrUsername || u.Username == req.EmailOrUsername);
-        if (user == null)
+        try
         {
-            // Constant-time compare against dummy values to prevent timing disclosure
-            var dummySalt = RandomNumberGenerator.GetBytes(16);
-            var dummyHash = RandomNumberGenerator.GetBytes(32);
-            _hasher.Verify(req.Password, dummyHash, dummySalt);
-            return Unauthorized(new ErrorResponse("invalid_credentials", "Invalid credentials"));
-        }
+            _logger.LogInformation("Login attempt for {Id}", req.EmailOrUsername);
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == req.EmailOrUsername || u.Username == req.EmailOrUsername);
+            if (user == null)
+            {
+                // Constant-time compare against dummy values to prevent timing disclosure
+                var dummySalt = RandomNumberGenerator.GetBytes(16);
+                var dummyHash = RandomNumberGenerator.GetBytes(32);
+                _hasher.Verify(req.Password, dummyHash, dummySalt);
+                _logger.LogWarning("Login failed: user not found for {Id}", req.EmailOrUsername);
+                return Unauthorized(new ErrorResponse("invalid_credentials", "Invalid credentials"));
+            }
 
-        var ok = _hasher.Verify(req.Password, user.PasswordHash, user.PasswordSalt);
-        if (!ok)
+            _logger.LogInformation("User resolved: {UserId}", user.Id);
+            var ok = _hasher.Verify(req.Password, user.PasswordHash, user.PasswordSalt);
+            if (!ok)
+            {
+                _logger.LogWarning("Login failed: bad password for user {UserId}", user.Id);
+                return Unauthorized(new ErrorResponse("invalid_credentials", "Invalid credentials"));
+            }
+
+            _logger.LogInformation("Password OK, issuing tokens for {UserId}", user.Id);
+            try
+            {
+                var (access, refresh) = await _jwt.IssueTokensAsync(user);
+                _logger.LogInformation("Login succeeded for {UserId}", user.Id);
+                return Ok(new TokenResponse(access, refresh));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "IssueTokens failed for {UserId}, falling back to ephemeral refresh", user.Id);
+                var access = _jwt.CreateAccessToken(user);
+                var refresh = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+                return Ok(new TokenResponse(access, refresh));
+            }
+        }
+        catch (Exception ex)
         {
-            return Unauthorized(new ErrorResponse("invalid_credentials", "Invalid credentials"));
+            _logger.LogError(ex, "Unhandled exception in Login for {Id}: {Message}", req.EmailOrUsername, ex.Message);
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse("error", "Internal Server Error"));
         }
-
-        var (access, refresh) = await _jwt.IssueTokensAsync(user);
-        return Ok(new TokenResponse(access, refresh));
     }
 
     [HttpPost("refresh")]

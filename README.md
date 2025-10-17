@@ -38,7 +38,27 @@ Symi API is an ASP.NET Core Web API.
 - Correlation ID (`X-Correlation-Id`) is echoed back in responses.
 - Unhandled exceptions return JSON with stack in Development.
 
-## Migration/DB (local)
+## Database & EF Core
 
-- SQLite default connection: `Data Source=symi.db`
-- DB initializes on first run.
+- Provider selection:
+  - SQLite by default: `ConnectionStrings:Default = "Data Source=symi.db"`
+  - PostgreSQL when conn string contains `Host=` or `Username=` (e.g. `Host=localhost;Database=symi;Username=postgres;Password=...`).
+- Initialization:
+  - Development/Production: applies migrations (`Database.Migrate()`).
+  - Testing: uses `EnsureCreated()` to avoid migration dependency.
+- Migrations (run from repo root):
+  - Add initial: `dotnet ef migrations add InitialCreate --project Symi.Api --startup-project Symi.Api`
+  - Update DB: `dotnet ef database update --project Symi.Api --startup-project Symi.Api`
+
+## Rate Limiting
+
+- Config-driven limits in `appsettings.json`:
+  - `RateLimit:DefaultPerMinute`: global default (e.g. `60`).
+  - `RateLimit:Routes:/auth/login`: stricter per-route (e.g. `15`).
+  - `RateLimit:Routes:/auth/refresh`: route override (e.g. `30`).
+- Responses include `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` and `Retry-After` on 429.
+
+## Error Contract
+
+- 403 Forbidden: `{ "code": "forbidden", "message": "Insufficient role or policy" }`
+- 500 Global handler: `{ "code": "error", "message": "<exception message>", "route": "<path>", "stack": "<stacktrace>" }` (stack present in Development).

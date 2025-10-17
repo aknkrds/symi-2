@@ -30,6 +30,8 @@ public class AppDbContext : DbContext
     public DbSet<Comment> Comments => Set<Comment>();
     public DbSet<Follow> Follows => Set<Follow>();
     public DbSet<Report> Reports => Set<Report>();
+    public DbSet<Role> Roles => Set<Role>();
+    public DbSet<UserRole> UserRoles => Set<UserRole>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -38,7 +40,26 @@ public class AppDbContext : DbContext
             entity.HasIndex(u => u.Email).IsUnique();
             entity.HasIndex(u => u.Username).IsUnique();
         });
-
+    
+        // Roles
+        modelBuilder.Entity<Role>(entity =>
+        {
+            entity.HasIndex(r => r.Name).IsUnique();
+        });
+    
+        modelBuilder.Entity<UserRole>(entity =>
+        {
+            entity.HasKey(ur => new { ur.UserId, ur.RoleId });
+            entity.HasOne(ur => ur.User)
+                  .WithMany()
+                  .HasForeignKey(ur => ur.UserId)
+                  .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(ur => ur.Role)
+                  .WithMany()
+                  .HasForeignKey(ur => ur.RoleId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+    
         modelBuilder.Entity<RefreshToken>(entity =>
         {
             entity.HasIndex(r => r.TokenHash).IsUnique();

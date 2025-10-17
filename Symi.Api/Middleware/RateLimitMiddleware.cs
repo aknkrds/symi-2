@@ -55,20 +55,33 @@ public class RateLimitMiddleware
         var window = TimeSpan.FromMinutes(1);
         var (count, ttl) = await store.IncrementAsync(key, window);
 
-        var limit = 60; // default policy: 60 req/min per IP per route
-        var remaining = Math.Max(0, limit - (int)count);
-        context.Response.Headers["RateLimit-Limit"] = limit.ToString();
+        // Config-based limits
+        var config = context.RequestServices.GetRequiredService<IConfiguration>();
+        var defaultLimit = int.TryParse(config["RateLimit:DefaultPerMinute"], out var dl) ? dl : 60;
+        var routeLimit = int.TryParse(config[$"RateLimit:Routes:{route}"], out var rl) ? rl : defaultLimit;
+
+        var remaining = Math.Max(0, routeLimit - (int)count);
+        context.Response.Headers["RateLimit-Limit"] = routeLimit.ToString();
         context.Response.Headers["RateLimit-Remaining"] = remaining.ToString();
         context.Response.Headers["RateLimit-Reset"] = ((int)ttl.TotalSeconds).ToString();
 
-        if (count > limit)
+        if (count > routeLimit)
         {
             context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            context.Response.Headers["Retry-After"] = Math.Max(1, (int)Math.Ceiling(ttl.TotalSeconds)).ToString();
             await context.Response.WriteAsJsonAsync(new { code = "rate_limit_exceeded", message = "Too Many Requests" });
             return;
         }
 
-        await _next(context);
+        try
+        {
+            await _next(context);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Downstream failure at {Route}: {Message}", route, ex.Message);
+            throw;
+        }
     }
 
     private static string GetClientIp(HttpContext context)

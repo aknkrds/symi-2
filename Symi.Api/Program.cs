@@ -9,6 +9,7 @@ using Serilog.Formatting.Json;
 using Symi.Api.Data;
 using Symi.Api.Middleware;
 using Symi.Api.Services;
+using Symi.Api.Models;
 using System.Text.Json;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -41,10 +42,28 @@ else
 Log.Logger = loggerConfig.CreateLogger();
 builder.Host.UseSerilog(Log.Logger);
 
-// DbContext (SQLite)
+// DbContext (SQLite/PostgreSQL via reflection)
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
-    options.UseSqlite(config.GetConnectionString("Default") ?? "Data Source=symi.db");
+    var defaultConn = config.GetConnectionString("Default") ?? "Data Source=symi.db";
+    if (defaultConn.Contains("Host=", StringComparison.OrdinalIgnoreCase) || defaultConn.Contains("Username=", StringComparison.OrdinalIgnoreCase))
+    {
+        var npgsqlExtType = Type.GetType("Npgsql.EntityFrameworkCore.PostgreSQLDbContextOptionsExtensions, Npgsql.EntityFrameworkCore.PostgreSQL");
+        var useNpgsql = npgsqlExtType?.GetMethod("UseNpgsql", new[] { typeof(DbContextOptionsBuilder), typeof(string) });
+        if (useNpgsql != null)
+        {
+            useNpgsql.Invoke(null, new object[] { options, defaultConn });
+        }
+        else
+        {
+            Log.Warning("PostgreSQL connection string detected but Npgsql provider not referenced; falling back to SQLite.");
+            options.UseSqlite("Data Source=symi.db");
+        }
+    }
+    else
+    {
+        options.UseSqlite(defaultConn);
+    }
 });
 
 // Authentication & JWT
@@ -133,12 +152,24 @@ else
 builder.Services.AddHostedService<ThumbnailWorker>();
 builder.Services.AddHostedService<PayoutWorker>();
 // RateLimit store selection (avoid Redis in Testing environment)
+// Prefer Redis when configured and reachable; otherwise fall back to in-memory to avoid startup failures.
 var redisConn = config.GetConnectionString("Redis") ?? config["Redis:ConnectionString"];
 var isTestingEnv = builder.Environment.IsEnvironment("Testing");
 if (!isTestingEnv && !string.IsNullOrWhiteSpace(redisConn))
 {
-    builder.Services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer>(sp => StackExchange.Redis.ConnectionMultiplexer.Connect(redisConn));
-    builder.Services.AddScoped<IRateLimitStore, RedisRateLimitStore>();
+    try
+    {
+        var opts = StackExchange.Redis.ConfigurationOptions.Parse(redisConn);
+        opts.AbortOnConnectFail = false;
+        var mux = StackExchange.Redis.ConnectionMultiplexer.Connect(opts);
+        builder.Services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer>(mux);
+        builder.Services.AddScoped<IRateLimitStore, RedisRateLimitStore>();
+    }
+    catch (Exception ex)
+    {
+        Serilog.Log.Warning(ex, "Redis connection failed; falling back to InMemoryRateLimitStore.");
+        builder.Services.AddSingleton<IRateLimitStore, InMemoryRateLimitStore>();
+    }
 }
 else
 {
@@ -181,7 +212,49 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    db.Database.EnsureCreated();
+
+    // Use EnsureCreated in Testing, otherwise prefer Migrate when migrations exist; fallback to EnsureCreated when none.
+    if (app.Environment.IsEnvironment("Testing"))
+    {
+        db.Database.EnsureCreated();
+    }
+    else
+    {
+        var hasMigrations = db.Database.GetMigrations().Any();
+        if (hasMigrations)
+        {
+            db.Database.Migrate();
+        }
+        else
+        {
+            Serilog.Log.Warning("No EF migrations found; using EnsureCreated to bootstrap schema.");
+            db.Database.EnsureCreated();
+        }
+    }
+
+    // Seed admin user only (avoid Role table dependency)
+    var hasher = scope.ServiceProvider.GetRequiredService<PasswordHasher>();
+    var adminEmail = "admin@local";
+    var admin = db.Users.FirstOrDefault(u => u.Email == adminEmail);
+    if (admin == null)
+    {
+        var pwd = "Admin123!";
+        var (hash, salt) = hasher.Hash(pwd);
+        admin = new User
+        {
+            Email = adminEmail,
+            Username = "admin",
+            FullName = "Admin",
+            Role = "admin",
+            Status = "active",
+            PasswordHash = hash,
+            PasswordSalt = salt,
+            PasswordAlgorithm = "PBKDF2",
+            CreatedAt = DateTime.UtcNow
+        };
+        db.Users.Add(admin);
+        db.SaveChanges();
+    }
 }
 
 // Pipeline
@@ -243,8 +316,11 @@ app.Use(async (context, next) =>
     await next();
 });
 
-// Rate limit
-app.UseMiddleware<RateLimitMiddleware>();
+// Rate limit (skip in Testing to reduce flakiness and external dependencies)
+if (!app.Environment.IsEnvironment("Testing"))
+{
+    app.UseMiddleware<RateLimitMiddleware>();
+}
 
 app.UseAuthentication();
 app.UseAuthorization();

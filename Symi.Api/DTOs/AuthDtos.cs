@@ -5,7 +5,7 @@ namespace Symi.Api.DTOs;
 public record RegisterRequest(
     [Required, EmailAddress] string Email,
     [Required, MinLength(2), MaxLength(20), RegularExpression("^[A-Za-z0-9_]{2,20}$")] string Username,
-    [Required, MinLength(8)] string Password,
+    [Required, MinLength(8), RegularExpression("^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{8,128}$")] string Password,
     string? FullName,
     DateOnly? BirthDate
 );
