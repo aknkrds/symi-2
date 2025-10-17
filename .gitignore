@@ -1,0 +1,34 @@
+# Build artifacts
+**/bin/
+**/obj/
+
+# IDE settings
+.vscode/
+.idea/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
+
+# NuGet packages
+**/packages/
+
+# Test results
+TestResult*/
+*.trx
+*.coverage
+
+# Local databases
+symi.db
+symi.db-shm
+symi.db-wal
+*.db
+*.db-shm
+*.db-wal
